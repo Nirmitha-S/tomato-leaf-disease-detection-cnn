@@ -1,0 +1,96 @@
+import os
+import numpy as np
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.models import load_model
+from flask import Flask, request, render_template, redirect, url_for, session
+from werkzeug.utils import secure_filename
+from PIL import Image
+
+# Define dataset paths
+TRAIN_DIR = "dataset/train"
+VALID_DIR = "dataset/valid"
+IMG_SIZE = (128, 128)
+BATCH_SIZE = 32
+EPOCHS = 10
+MODEL_PATH = "plant_disease_model.h5"
+
+# Create model
+def create_model():
+    model = Sequential([
+        Conv2D(32, (3,3), activation='relu', input_shape=(128, 128, 3)),
+        MaxPooling2D(2,2),
+        Conv2D(64, (3,3), activation='relu'),
+        MaxPooling2D(2,2),
+        Conv2D(128, (3,3), activation='relu'),
+        MaxPooling2D(2,2),
+        Flatten(),
+        Dense(512, activation='relu'),
+        Dropout(0.5),
+        Dense(15, activation='softmax')  # Adjust classes as needed
+    ])
+    model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+    return model
+
+# Train the model
+def train_model():
+    train_datagen = ImageDataGenerator(rescale=1./255, rotation_range=30, zoom_range=0.2, horizontal_flip=True)
+    valid_datagen = ImageDataGenerator(rescale=1./255)
+    train_generator = train_datagen.flow_from_directory(TRAIN_DIR, target_size=IMG_SIZE, batch_size=BATCH_SIZE, class_mode='categorical')
+    valid_generator = valid_datagen.flow_from_directory(VALID_DIR, target_size=IMG_SIZE, batch_size=BATCH_SIZE, class_mode='categorical')
+    model = create_model()
+    model.fit(train_generator, validation_data=valid_generator, epochs=EPOCHS)
+    model.save(MODEL_PATH)
+
+# Flask App
+app = Flask(__name__)
+app.secret_key = 'secret_key'
+UPLOAD_FOLDER = 'uploads'
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+model = load_model(MODEL_PATH)
+
+# User login (basic session handling)
+users = {"admin": "password"}  # Simple user management (For production, use DB)
+
+@app.route('/', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        if users.get(username) == password:
+            session['user'] = username
+            return redirect(url_for('upload'))
+    return render_template('login.html')
+
+@app.route('/upload', methods=['GET', 'POST'])
+def upload():
+    if 'user' not in session:
+        return redirect(url_for('login'))
+    if request.method == 'POST':
+        file = request.files['file']
+        if file:
+            filename = secure_filename(file.filename)
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(filepath)
+            disease, accuracy = predict_disease(filepath)
+            return render_template('result.html', disease=disease, accuracy=accuracy)
+    return render_template('upload.html')
+
+# Prediction function
+def predict_disease(image_path):
+    img = Image.open(image_path).resize(IMG_SIZE)
+    img_array = np.array(img) / 255.0
+    img_array = np.expand_dims(img_array, axis=0)
+    predictions = model.predict(img_array)
+    class_idx = np.argmax(predictions)
+    accuracy = np.max(predictions) * 100
+    class_labels = list(train_generator.class_indices.keys())
+    return class_labels[class_idx], accuracy
+
+# Run the Flask app
+if __name__ == '__main__':
+    app.run(debug=True)
